@@ -1,0 +1,57 @@
+name: Check for Metabase Updates
+
+on:
+  schedule:
+    - cron: '0 10 * * *'  # Daily at 10 AM UTC
+  workflow_dispatch:
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get latest Metabase release
+        id: metabase
+        run: |
+          # Fetch latest release tag (format: vX.YY.Z) and strip the 'v' prefix
+          VERSION=$(curl -s https://api.github.com/repos/metabase/metabase/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Latest Metabase release: $VERSION"
+
+      - name: Get current buildpack version
+        id: current
+        run: |
+          # Read version from bin/version (format: X.YY.Z without 'v')
+          CURRENT=$(cat bin/version | tr -d '\n')
+          echo "version=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current buildpack version: $CURRENT"
+
+      - name: Compare versions
+        id: compare
+        run: |
+          if [ "${{ steps.metabase.outputs.version }}" != "${{ steps.current.outputs.version }}" ]; then
+            echo "update_needed=true" >> $GITHUB_OUTPUT
+            echo "Update needed: ${{ steps.current.outputs.version }} -> ${{ steps.metabase.outputs.version }}"
+          else
+            echo "No update needed, already on latest version"
+          fi
+
+      - name: Update version file
+        if: steps.compare.outputs.update_needed == 'true'
+        run: |
+          echo "${{ steps.metabase.outputs.version }}" > bin/version
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bin/version
+          git commit -m "Update Metabase to v${{ steps.metabase.outputs.version }}"
+          git push
+
+      - name: Trigger deployment workflow
+        if: steps.compare.outputs.update_needed == 'true'
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.DEPLOYMENT_PAT }}" \
+            https://api.github.com/repos/${{ secrets.DISPATCH_TARGET_REPO }}/dispatches \
+            -d '{"event_type":"metabase-update","client_payload":{"version":"${{ steps.metabase.outputs.version }}"}}'
